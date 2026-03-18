@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opendetect"
+version = "0.1.0"
+description = "Modular, extensible machine-text detection toolkit"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "torch",
+    "transformers<4.42.0",
+    "datasets",
+    "pandas",
+    "tqdm",
+    "sentencepiece",
+    "sentence-transformers",
+    "clean-text",
+    "scikit-learn",
+    "tabulate",
+    "accelerate",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+opendetect = "opendetect.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
