@@ -34,8 +34,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "dataset",
+        nargs="+",
         help=(
-            "Path to a JSONL file, or a HuggingFace dataset identifier "
+            "Path to one or more JSONL files, or HuggingFace dataset identifiers "
             "(e.g. 'username/dataset_name')."
         ),
     )
@@ -131,142 +132,188 @@ def main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output_dir) if args.output_dir else get_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    ds_key = _dataset_key(args.dataset)
-    suffix = ".debug" if args.debug else ""
-    output_path = output_dir / f"{ds_key}_scores{suffix}.jsonl"
-
     if args.evaluate:
-        if not output_path.exists():
-            logger.error("Saved scores file not found: %s", output_path)
-            return 1
-            
-        logger.info("Evaluating results from %s", output_path)
-        df = pd.read_json(output_path, lines=True)
-        
-        if args.label_field not in df.columns:
-            logger.error("Dataset lacks the label column '%s' required for evaluation.", args.label_field)
-            return 1
-
-        machine_df = df[df[args.label_field] == args.machine_label]
-        human_df = df[df[args.label_field] != args.machine_label]
-        
         from opendetect.metrics import get_tpr_target
         from sklearn.metrics import roc_auc_score, roc_curve
-        
-        results = []
-        for det in list_detectors():
-            if det in df.columns:
-                human_scores = human_df[det].dropna().tolist()
-                machine_scores = machine_df[det].dropna().tolist()
-                
-                if not human_scores or not machine_scores:
-                    continue
-                
-                scores = human_scores + machine_scores
-                labels = [0] * len(human_scores) + [1] * len(machine_scores)
-                fpr, tpr, _ = roc_curve(labels, scores)
-                roc_auc = roc_auc_score(labels, scores)
 
-                row = {"Detector": det.upper(), "ROC AUC": f"{roc_auc:.4f}"}
+        detector_metrics_all = {}
+
+        for dataset in args.dataset:
+            ds_key = _dataset_key(dataset)
+            suffix = ".debug" if args.debug else ""
+            output_path = output_dir / f"{ds_key}_scores{suffix}.jsonl"
+
+            if not output_path.exists():
+                logger.error("Saved scores file not found: %s", output_path)
+                continue
                 
-                for target_fpr in [0.001, 0.01, 0.1]:
-                    roc_auc_at_fpr = roc_auc_score(labels, scores, max_fpr=target_fpr)
-                    row[f"AUROC({target_fpr*100})"] = f"{roc_auc_at_fpr:.4f}"
+            logger.info("Evaluating results from %s", output_path)
+            df = pd.read_json(output_path, lines=True)
+            
+            if args.label_field not in df.columns:
+                logger.error("Dataset lacks the label column '%s' required for evaluation.", args.label_field)
+                continue
+
+            machine_df = df[df[args.label_field] == args.machine_label]
+            human_df = df[df[args.label_field] != args.machine_label]
+            
+            results = []
+            for det in list_detectors():
+                if det in df.columns:
+                    human_scores = human_df[det].dropna().tolist()
+                    machine_scores = machine_df[det].dropna().tolist()
                     
+                    if not human_scores or not machine_scores:
+                        continue
+                    
+                    scores = human_scores + machine_scores
+                    labels = [0] * len(human_scores) + [1] * len(machine_scores)
+                    fpr, tpr, _ = roc_curve(labels, scores)
+                    roc_auc = float(roc_auc_score(labels, scores))
+
+                    row = {"Detector": det.upper(), "ROC AUC": f"{roc_auc:.4f}"}
+                    
+                    det_upper = det.upper()
+                    if det_upper not in detector_metrics_all:
+                        detector_metrics_all[det_upper] = {}
+                        
+                    detector_metrics_all[det_upper].setdefault("ROC AUC", []).append(roc_auc)
+                    
+                    for target_fpr in [0.001, 0.01, 0.1]:
+                        roc_auc_at_fpr = float(roc_auc_score(labels, scores, max_fpr=target_fpr))
+                        metric_name = f"AUROC({target_fpr*100})"
+                        row[metric_name] = f"{roc_auc_at_fpr:.4f}"
+                        detector_metrics_all[det_upper].setdefault(metric_name, []).append(roc_auc_at_fpr)
+                        
+                    for target_fpr in [0.001, 0.01, 0.1]:
+                        tpr_val = float(get_tpr_target(fpr, tpr, target_fpr))
+                        metric_name = f"TPR(FPR={target_fpr*100}%)"
+                        row[metric_name] = f"{tpr_val:5.1f}%"
+                        detector_metrics_all[det_upper].setdefault(metric_name, []).append(tpr_val)
+                    
+                    results.append(row)
+                    
+            if results:
+                results_df = pd.DataFrame(results)
+                print(f"\nEvaluation Results for {dataset}:")
+                print("-" * 105)
+                print(results_df.to_markdown(index=False))
+                print("-" * 105 + "\n")
+                
+        if len(args.dataset) > 1 and detector_metrics_all:
+            macro_results = []
+            for det in list_detectors():
+                det_upper = det.upper()
+                if det_upper not in detector_metrics_all:
+                    continue
+                metrics = detector_metrics_all[det_upper]
+                row = {"Detector": det_upper}
+                avg_roc = sum(metrics["ROC AUC"]) / len(metrics["ROC AUC"])
+                row["ROC AUC"] = f"{avg_roc:.4f}"
                 for target_fpr in [0.001, 0.01, 0.1]:
-                    tpr_val = get_tpr_target(fpr, tpr, target_fpr)
-                    row[f"TPR(FPR={target_fpr*100}%)"] = f"{tpr_val:5.1f}%"
+                    metric_name = f"AUROC({target_fpr*100})"
+                    avg_val = sum(metrics[metric_name]) / len(metrics[metric_name])
+                    row[metric_name] = f"{avg_val:.4f}"
+                for target_fpr in [0.001, 0.01, 0.1]:
+                    metric_name = f"TPR(FPR={target_fpr*100}%)"
+                    avg_val = sum(metrics[metric_name]) / len(metrics[metric_name])
+                    row[metric_name] = f"{avg_val:5.1f}%"
+                macro_results.append(row)
                 
-                results.append(row)
+            if macro_results:
+                macro_results_df = pd.DataFrame(macro_results)
+                print("\nMacro Average Evaluation Results:")
+                print("-" * 105)
+                print(macro_results_df.to_markdown(index=False))
+                print("-" * 105 + "\n")
                 
-        if results:
-            results_df = pd.DataFrame(results)
-            print("\nEvaluation Results:")
-            print("-" * 105)
-            print(results_df.to_markdown(index=False))
-            print("-" * 105 + "\n")
         return 0
 
+    # --- Loop over datasets for running detectors -----------------------------
+    for dataset in args.dataset:
+        ds_key = _dataset_key(dataset)
+        suffix = ".debug" if args.debug else ""
+        output_path = output_dir / f"{ds_key}_scores{suffix}.jsonl"
 
-    # --- Load dataset ---------------------------------------------------------
-    logger.info("Loading dataset: %s", args.dataset)
-    df = load_dataset(
-        args.dataset,
-        text_field=args.text_field,
-        label_field=args.label_field,
-        split=args.split,
-    )
-
-    if args.debug:
-        df = df.head(100)
-        logger.info("Debug mode — using first 100 examples.")
-
-    # --- Few-shot extraction --------------------------------------------------
-    fewshot_texts: list[str] = []
-    if args.num_fewshot > 0:
-        df, fewshot_texts = extract_fewshot(
-            df,
-            num_fewshot=args.num_fewshot,
-            label_field=args.label_field,
-            machine_label=args.machine_label,
+        # --- Load dataset ---------------------------------------------------------
+        logger.info("Loading dataset: %s", dataset)
+        df = load_dataset(
+            dataset,
             text_field=args.text_field,
+            label_field=args.label_field,
+            split=args.split,
         )
 
-    # Filter out rows with empty text
-    df = df[df[args.text_field].apply(lambda t: isinstance(t, str) and len(t.strip()) > 0)]
-    df = df.reset_index(drop=True)
-    texts = df[args.text_field].tolist()
-    logger.info("Scoring %d texts.", len(texts))
+        if args.debug:
+            df = df.head(100)
+            logger.info("Debug mode — using first 100 examples.")
 
-    # --- Resume from existing scores -----------------------------------------
-    if output_path.exists():
-        logger.info("Found existing output at %s — loading.", output_path)
-        existing_df = pd.read_json(output_path, lines=True)
-        # Merge previously computed detector columns into the dataframe
-        for col in existing_df.columns:
-            if col not in df.columns:
-                df[col] = existing_df[col]
-
-    # --- Determine which detectors to run ------------------------------------
-    if args.detector:
-        detector_names = [args.detector]
-    else:
-        detector_names = list_detectors()
-
-    # --- Run detectors --------------------------------------------------------
-    for name in detector_names:
-        if name in df.columns:
-            logger.info("Skipping %s — already computed.", name)
-            continue
-
-        detector_cls = get_detector(name)
-        detector = detector_cls()
-
-        # Skip fewshot-required detectors if no fewshot available
-        if detector.requires_fewshot and not fewshot_texts:
-            logger.warning(
-                "Skipping %s — requires --num-fewshot > 0.",
-                name,
+        # --- Few-shot extraction --------------------------------------------------
+        fewshot_texts: list[str] = []
+        if args.num_fewshot > 0:
+            df, fewshot_texts = extract_fewshot(
+                df,
+                num_fewshot=args.num_fewshot,
+                label_field=args.label_field,
+                machine_label=args.machine_label,
+                text_field=args.text_field,
             )
-            continue
 
-        logger.info("Running detector: %s", name)
-        try:
-            kwargs: dict = {"batch_size": args.batch_size}
-            if detector.requires_fewshot:
-                kwargs["background_texts"] = fewshot_texts
-            scores = detector.score(texts, **kwargs)
-            df[name] = scores
-        except Exception:
-            logger.exception("Detector %s failed — skipping.", name)
-            continue
+        # Filter out rows with empty text
+        df = df[df[args.text_field].apply(lambda t: isinstance(t, str) and len(t.strip()) > 0)]
+        df = df.reset_index(drop=True)
+        texts = df[args.text_field].tolist()
+        logger.info("Scoring %d texts.", len(texts))
 
-        # Save incrementally after each detector
+        # --- Resume from existing scores -----------------------------------------
+        if output_path.exists():
+            logger.info("Found existing output at %s — loading.", output_path)
+            existing_df = pd.read_json(output_path, lines=True)
+            # Merge previously computed detector columns into the dataframe
+            for col in existing_df.columns:
+                if col not in df.columns:
+                    df[col] = existing_df[col]
+
+        # --- Determine which detectors to run ------------------------------------
+        if args.detector:
+            detector_names = [args.detector]
+        else:
+            detector_names = list_detectors()
+
+        # --- Run detectors --------------------------------------------------------
+        for name in detector_names:
+            if name in df.columns:
+                logger.info("Skipping %s — already computed.", name)
+                continue
+
+            detector_cls = get_detector(name)
+            detector = detector_cls()
+
+            # Skip fewshot-required detectors if no fewshot available
+            if detector.requires_fewshot and not fewshot_texts:
+                logger.warning(
+                    "Skipping %s — requires --num-fewshot > 0.",
+                    name,
+                )
+                continue
+
+            logger.info("Running detector: %s", name)
+            try:
+                kwargs: dict = {"batch_size": args.batch_size}
+                if detector.requires_fewshot:
+                    kwargs["background_texts"] = fewshot_texts
+                scores = detector.score(texts, **kwargs)
+                df[name] = scores
+            except Exception:
+                logger.exception("Detector %s failed — skipping.", name)
+                continue
+
+            # Save incrementally after each detector
+            df.to_json(output_path, orient="records", lines=True)
+
+        # --- Final save -----------------------------------------------------------
         df.to_json(output_path, orient="records", lines=True)
-
-    # --- Final save -----------------------------------------------------------
-    df.to_json(output_path, orient="records", lines=True)
-    logger.info("Results saved to: %s", output_path)
+        logger.info("Results saved to: %s", output_path)
 
     return 0
 
