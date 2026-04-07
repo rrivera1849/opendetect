@@ -18,7 +18,7 @@ import pandas as pd
 
 from opendetect import __version__
 from opendetect.config import get_output_dir
-from opendetect.data import extract_fewshot, load_dataset
+from opendetect.data import load_dataset
 
 # Import detectors to trigger registration
 import opendetect.detectors  # noqa: F401
@@ -49,6 +49,11 @@ def _build_parser() -> argparse.ArgumentParser:
             "If omitted, all registered detectors are executed.  "
             f"Available: {', '.join(list_detectors())}"
         ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force re-run of detectors even if results already exist.",
     )
     parser.add_argument(
         "--text-field",
@@ -106,6 +111,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Evaluate metrics from the saved scores file instead of running detectors.",
     )
     parser.add_argument(
+        "--num-trials",
+        type=int,
+        default=100,
+        help=(
+            "Number of random support-set trials for style-based detectors "
+            "(default: 100)."
+        ),
+    )
+    parser.add_argument(
+        "--source-field",
+        type=str,
+        default=None,
+        help=(
+            "Column name for machine source annotation.  Enables multi-target "
+            "mode for style-based detectors."
+        ),
+    )
+    parser.add_argument(
+        "--source-preprocess",
+        type=str,
+        default=None,
+        help=(
+            "Python lambda expression to preprocess the source field, "
+            "e.g. \"lambda x: x.split('/')[-1]\"."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -133,7 +165,9 @@ def main(argv: list[str] | None = None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.evaluate:
-        from opendetect.metrics import get_tpr_target
+        import numpy as np
+
+        from opendetect.metrics import evaluate_score_matrix, get_tpr_target
         from sklearn.metrics import roc_auc_score, roc_curve
 
         detector_metrics_all = {}
@@ -146,53 +180,94 @@ def main(argv: list[str] | None = None) -> int:
             if not output_path.exists():
                 logger.error("Saved scores file not found: %s", output_path)
                 continue
-                
+
             logger.info("Evaluating results from %s", output_path)
             df = pd.read_json(output_path, lines=True)
-            
+
             if args.label_field not in df.columns:
-                logger.error("Dataset lacks the label column '%s' required for evaluation.", args.label_field)
+                logger.error(
+                    "Dataset lacks the label column '%s' required for evaluation.",
+                    args.label_field,
+                )
                 continue
 
             machine_df = df[df[args.label_field] == args.machine_label]
             human_df = df[df[args.label_field] != args.machine_label]
-            
+
             results = []
             for det in list_detectors():
-                if det in df.columns:
-                    human_scores = human_df[det].dropna().tolist()
-                    machine_scores = machine_df[det].dropna().tolist()
-                    
-                    if not human_scores or not machine_scores:
-                        continue
-                    
-                    scores = human_scores + machine_scores
-                    labels = [0] * len(human_scores) + [1] * len(machine_scores)
-                    fpr, tpr, _ = roc_curve(labels, scores)
-                    roc_auc = float(roc_auc_score(labels, scores))
+                if det not in df.columns:
+                    continue
 
-                    row = {"Detector": det.upper(), "ROC AUC": f"{roc_auc:.4f}"}
-                    
-                    det_upper = det.upper()
-                    if det_upper not in detector_metrics_all:
-                        detector_metrics_all[det_upper] = {}
-                        
-                    detector_metrics_all[det_upper].setdefault("ROC AUC", []).append(roc_auc)
-                    
+                det_upper = det.upper()
+                if det_upper not in detector_metrics_all:
+                    detector_metrics_all[det_upper] = {}
+
+                # Check for NPZ score matrix (styledetect multi-trial)
+                npz_path = output_path.with_suffix(f".{det}.npz")
+                if npz_path.exists():
+                    npz = np.load(npz_path, allow_pickle=True)
+                    score_matrix = npz["scores"]
+                    labels_arr = np.array(
+                        (df[args.label_field] == args.machine_label).astype(int),
+                    )
+                    trial_avg = evaluate_score_matrix(
+                        score_matrix,
+                        labels_arr,
+                    )
+                    if not trial_avg:
+                        continue
+                    row = {
+                        "Detector": det_upper,
+                        "ROC AUC": f"{trial_avg['ROC AUC']:.4f}",
+                    }
+                    detector_metrics_all[det_upper].setdefault(
+                        "ROC AUC", [],
+                    ).append(trial_avg["ROC AUC"])
                     for target_fpr in [0.001, 0.01, 0.1]:
-                        roc_auc_at_fpr = float(roc_auc_score(labels, scores, max_fpr=target_fpr))
-                        metric_name = f"AUROC({target_fpr*100})"
-                        row[metric_name] = f"{roc_auc_at_fpr:.4f}"
-                        detector_metrics_all[det_upper].setdefault(metric_name, []).append(roc_auc_at_fpr)
-                        
-                    for target_fpr in [0.001, 0.01, 0.1]:
-                        tpr_val = float(get_tpr_target(fpr, tpr, target_fpr))
-                        metric_name = f"TPR(FPR={target_fpr*100}%)"
-                        row[metric_name] = f"{tpr_val:5.1f}%"
-                        detector_metrics_all[det_upper].setdefault(metric_name, []).append(tpr_val)
-                    
+                        auroc_key = f"AUROC({target_fpr * 100})"
+                        row[auroc_key] = f"{trial_avg[auroc_key]:.4f}"
+                        detector_metrics_all[det_upper].setdefault(
+                            auroc_key, [],
+                        ).append(trial_avg[auroc_key])
+                        tpr_key = f"TPR(FPR={target_fpr * 100}%)"
+                        row[tpr_key] = f"{trial_avg[tpr_key]:5.1f}%"
+                        detector_metrics_all[det_upper].setdefault(
+                            tpr_key, [],
+                        ).append(trial_avg[tpr_key])
                     results.append(row)
-                    
+                    continue
+
+                # Standard single-score evaluation
+                human_scores = human_df[det].dropna().tolist()
+                machine_scores = machine_df[det].dropna().tolist()
+
+                if not human_scores or not machine_scores:
+                    continue
+
+                scores = human_scores + machine_scores
+                labels = [0] * len(human_scores) + [1] * len(machine_scores)
+                fpr, tpr, _ = roc_curve(labels, scores)
+                roc_auc = float(roc_auc_score(labels, scores))
+
+                row = {"Detector": det_upper, "ROC AUC": f"{roc_auc:.4f}"}
+
+                detector_metrics_all[det_upper].setdefault("ROC AUC", []).append(roc_auc)
+
+                for target_fpr in [0.001, 0.01, 0.1]:
+                    roc_auc_at_fpr = float(roc_auc_score(labels, scores, max_fpr=target_fpr))
+                    metric_name = f"AUROC({target_fpr*100})"
+                    row[metric_name] = f"{roc_auc_at_fpr:.4f}"
+                    detector_metrics_all[det_upper].setdefault(metric_name, []).append(roc_auc_at_fpr)
+
+                for target_fpr in [0.001, 0.01, 0.1]:
+                    tpr_val = float(get_tpr_target(fpr, tpr, target_fpr))
+                    metric_name = f"TPR(FPR={target_fpr*100}%)"
+                    row[metric_name] = f"{tpr_val:5.1f}%"
+                    detector_metrics_all[det_upper].setdefault(metric_name, []).append(tpr_val)
+
+                results.append(row)
+
             if results:
                 results_df = pd.DataFrame(results)
                 print(f"\nEvaluation Results for {dataset}:")
@@ -248,16 +323,9 @@ def main(argv: list[str] | None = None) -> int:
             df = df.head(100)
             logger.info("Debug mode — using first 100 examples.")
 
-        # --- Few-shot extraction --------------------------------------------------
-        fewshot_texts: list[str] = []
-        if args.num_fewshot > 0:
-            df, fewshot_texts = extract_fewshot(
-                df,
-                num_fewshot=args.num_fewshot,
-                label_field=args.label_field,
-                machine_label=args.machine_label,
-                text_field=args.text_field,
-            )
+        # --- Few-shot -------------------------------------------------------------
+        # All current few-shot detectors manage their own support-set sampling,
+        # so we no longer extract and remove fixed few-shot rows here.
 
         # Filter out rows with empty text
         df = df[df[args.text_field].apply(lambda t: isinstance(t, str) and len(t.strip()) > 0)]
@@ -269,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
         if output_path.exists():
             logger.info("Found existing output at %s — loading.", output_path)
             existing_df = pd.read_json(output_path, lines=True)
+            # TODO: Migrate all detector score saving to NPZ format.
             # Merge previously computed detector columns into the dataframe
             for col in existing_df.columns:
                 if col not in df.columns:
@@ -282,7 +351,7 @@ def main(argv: list[str] | None = None) -> int:
 
         # --- Run detectors --------------------------------------------------------
         for name in detector_names:
-            if name in df.columns:
+            if name in df.columns and not args.force:
                 logger.info("Skipping %s — already computed.", name)
                 continue
 
@@ -290,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
             detector = detector_cls()
 
             # Skip fewshot-required detectors if no fewshot available
-            if detector.requires_fewshot and not fewshot_texts:
+            if detector.requires_fewshot and args.num_fewshot <= 0:
                 logger.warning(
                     "Skipping %s — requires --num-fewshot > 0.",
                     name,
@@ -301,7 +370,21 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 kwargs: dict = {"batch_size": args.batch_size}
                 if detector.requires_fewshot:
-                    kwargs["background_texts"] = fewshot_texts
+                    machine_mask = df[args.label_field] == args.machine_label
+                    kwargs["machine_indices"] = df.index[machine_mask].tolist()
+                    kwargs["num_trials"] = args.num_trials
+                    kwargs["num_fewshot"] = args.num_fewshot
+                    kwargs["output_path"] = output_path.with_suffix(
+                        f".{name}.npz",
+                    )
+                    if args.source_field:
+                        source_vals = df.loc[
+                            machine_mask, args.source_field
+                        ].tolist()
+                        if args.source_preprocess:
+                            fn = eval(args.source_preprocess)  # noqa: S307
+                            source_vals = [fn(x) for x in source_vals]
+                        kwargs["source_labels"] = source_vals
                 scores = detector.score(texts, **kwargs)
                 df[name] = scores
             except Exception:

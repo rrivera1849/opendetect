@@ -2,6 +2,7 @@
 
 Supports:
 - Local JSONL / JSON files
+- Local CSV files
 - HuggingFace dataset identifiers
 """
 
@@ -26,7 +27,7 @@ def load_dataset(
     Parameters
     ----------
     source:
-        Either a path to a local JSONL/JSON file, or a HuggingFace dataset
+        Either a path to a local JSONL/JSON/CSV file, or a HuggingFace dataset
         identifier (e.g. ``"username/dataset_name"``).
     text_field:
         Name of the column containing the text to classify.
@@ -44,7 +45,10 @@ def load_dataset(
     """
     path = Path(source)
 
-    if path.suffix in (".jsonl", ".json") or path.exists():
+    if path.suffix == ".csv":
+        logger.info("Loading local CSV file: %s", source)
+        df = pd.read_csv(source)
+    elif path.suffix in (".jsonl", ".json") or path.exists():
         logger.info("Loading local file: %s", source)
         lines = path.suffix == ".jsonl" or _looks_like_jsonl(path)
         df = pd.read_json(source, lines=lines)
