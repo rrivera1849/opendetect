@@ -139,10 +139,11 @@ class _StyleDetectorBase(BaseDetector):
         **kwargs:
             Must include ``machine_indices``, ``num_fewshot``, and
             ``num_trials``.  Optionally ``source_labels`` for multi-target
-            mode, ``multitarget_mode`` (``"max"``, ``"single"``, or
-            ``"domain"``, default ``"max"``) controlling how the stratified
-            support set is scored, ``domain_labels`` (required for
-            ``"domain"`` mode) providing per-text domain labels for all
+            mode, ``multitarget_mode`` (``"max"``, ``"instance"``,
+            ``"single"``, ``"domain"``, or ``"domain-single"``; default
+            ``"max"``) controlling how the stratified support set is
+            scored, ``domain_labels`` (required for ``"domain"`` mode)
+            providing per-text domain labels for all
             texts, ``output_path`` for saving the score matrix, and
             ``batch_size``.
 
@@ -259,6 +260,10 @@ class _StyleDetectorBase(BaseDetector):
         #   * "max"    — per-class aggregates, score = max cosine similarity
         #                across class centroids (the original multi-target
         #                behavior).
+        #   * "instance" — no aggregation; score = max cosine similarity to
+        #                any individual support embedding.  Matches LUAR's
+        #                original "multiple_target" nearest-instance rule
+        #                and diverges from "max" whenever num_fewshot > 1.
         #   * "single" — pool all stratified samples into one mean centroid,
         #                exactly like the no-source-labels path but with a
         #                class-balanced support set.
@@ -277,6 +282,13 @@ class _StyleDetectorBase(BaseDetector):
                 support_sets,
                 source_labels,
                 machine_indices_arr,
+                aggregate_fn,
+                query_groups=query_groups,
+            )
+        elif source_labels is not None and multitarget_mode == "instance":
+            score_matrix = _compute_scores_instance(
+                embeddings,
+                support_sets,
                 aggregate_fn,
                 query_groups=query_groups,
             )
@@ -862,6 +874,78 @@ def _compute_scores_multitarget(
     return scores
 
 
+def _compute_scores_instance(
+    embeddings: torch.Tensor,
+    support_sets: list[np.ndarray],
+    aggregate_fn: Callable[[np.ndarray], torch.Tensor],
+    query_groups: list[list[np.ndarray]] | None = None,
+) -> np.ndarray:
+    """Compute score matrix for the nearest-instance multi-target setting.
+
+    For each trial, scores each sample (or each query group) by its maximum
+    cosine similarity to any individual support embedding — no per-class
+    aggregation.  Class labels are used only for support-set stratification
+    at sampling time.  Matches LUAR's original ``multiple_target`` rule:
+    ``score(q) = max over s in S of cos(q, s)``.
+
+    Parameters
+    ----------
+    embeddings:
+        L2-normalized embeddings of shape ``(N, d)``.
+    support_sets:
+        List of arrays, each containing dataset indices for a trial's
+        support set (all classes concatenated).
+    aggregate_fn:
+        Only used in grouped mode to aggregate each query group into a
+        single embedding; never applied to supports.
+    query_groups:
+        If provided, per-trial list of query-group index arrays; each
+        group's aggregate embedding is scored instead of each raw text.
+
+    Returns
+    -------
+    np.ndarray
+        Score matrix of shape ``(num_trials, N)`` (or
+        ``(num_trials, num_groups)`` in grouped mode).
+    """
+    num_trials = len(support_sets)
+    num_samples = embeddings.size(0)
+
+    grouped = query_groups is not None
+    num_cols = len(query_groups[0]) if grouped else num_samples
+    scores = np.empty((num_trials, num_cols), dtype=np.float32)
+
+    desc = (
+        "StyleDetect trials (instance, grouped)"
+        if grouped
+        else "StyleDetect trials (instance)"
+    )
+    for t, support_idx in enumerate(tqdm(support_sets, desc=desc)):
+        # (|S|, d) — per-text embeddings of every support example
+        support_emb = embeddings[support_idx]
+
+        if grouped:
+            groups = query_groups[t]
+            group_embs = torch.cat(
+                [aggregate_fn(g) for g in groups],
+                dim=0,
+            )
+            sim_matrix = torch.mm(group_embs, support_emb.t())
+            trial_scores = sim_matrix.max(dim=1).values
+            scores[t] = trial_scores.float().cpu().numpy()
+            continue
+
+        # (N, |S|) cosine sim — both sides L2-normalized.
+        sim_matrix = torch.mm(embeddings, support_emb.t())
+        trial_scores = sim_matrix.max(dim=1).values
+        scores[t] = trial_scores.float().cpu().numpy()
+
+        # Self-exclusion
+        scores[t, support_idx] = np.nan
+
+    return scores
+
+
 def _compute_scores_domain_multitarget(
     embeddings: torch.Tensor,
     support_sets: list[np.ndarray],
@@ -1183,6 +1267,12 @@ class StyleDetectCISR(_StyleDetectorBase):
     """StyleDetect using CISR style embeddings."""
 
     MODEL_NAME = "AnnaWegmann/Style-Embedding"
+
+@register_detector("styledetect-lusr")
+class StyleDetectLUSR(_StyleDetectorBase):
+    """StyleDetect using LUSR style embeddings."""
+
+    MODEL_NAME = "rrivera1849/LUSR"
 
 
 @register_detector("styledetect-sd")

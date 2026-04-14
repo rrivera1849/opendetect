@@ -140,19 +140,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--multitarget-mode",
         type=str,
-        choices=["max", "single", "domain", "domain-single"],
+        choices=["max", "instance", "single", "domain", "domain-single"],
         default="max",
         help=(
             "How to use --source-field for style detectors.  'max' (default) "
             "computes per-class aggregate embeddings and scores by max cosine "
-            "similarity.  'single' uses --source-field only to stratify the "
-            "support set, then pools all stratified samples into one mean "
-            "centroid.  'domain' restricts scoring to same-domain centroids — "
-            "each query is scored against class centroids built from support "
-            "samples sharing its domain (requires --domain-field).  "
-            "'domain-single' samples per (domain, class) pair but pools each "
-            "domain's samples into one mean centroid — queries score against "
-            "their own domain's single centroid (requires --domain-field)."
+            "similarity.  'instance' skips aggregation entirely and scores by "
+            "max cosine similarity to any individual support embedding (LUAR's "
+            "original nearest-instance rule; diverges from 'max' when "
+            "--num-fewshot > 1).  'single' uses --source-field only to "
+            "stratify the support set, then pools all stratified samples into "
+            "one mean centroid.  'domain' restricts scoring to same-domain "
+            "centroids — each query is scored against class centroids built "
+            "from support samples sharing its domain (requires "
+            "--domain-field).  'domain-single' samples per (domain, class) "
+            "pair but pools each domain's samples into one mean centroid — "
+            "queries score against their own domain's single centroid "
+            "(requires --domain-field)."
         ),
     )
     parser.add_argument(
