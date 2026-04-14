@@ -195,6 +195,26 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--reviser",
+        type=str,
+        choices=["hf", "openai"],
+        default="hf",
+        help=(
+            "Reviser backend for revise-detect.  'hf' loads a local "
+            "HuggingFace chat model (default Qwen2.5-7B-Instruct); "
+            "'openai' calls the OpenAI API (requires OPENAI_API_KEY)."
+        ),
+    )
+    parser.add_argument(
+        "--reviser-model",
+        type=str,
+        default=None,
+        help=(
+            "Override the reviser model identifier.  Defaults: "
+            "Qwen/Qwen2.5-7B-Instruct (hf), gpt-4o-mini (openai)."
+        ),
+    )
+    parser.add_argument(
         "--dna-gpt-regenerator",
         type=str,
         choices=["hf", "openai"],
@@ -503,6 +523,10 @@ def main(argv: list[str] | None = None) -> int:
                         kwargs["domain_labels"] = domain_vals
                     if args.group_size is not None:
                         kwargs["group_size"] = args.group_size
+                if name == "revise-detect":
+                    kwargs["reviser"] = args.reviser
+                    if args.reviser_model is not None:
+                        kwargs["reviser_model"] = args.reviser_model
                 if name == "dna-gpt":
                     kwargs["regenerator"] = args.dna_gpt_regenerator
                     if args.dna_gpt_regenerator_model is not None:
