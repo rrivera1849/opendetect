@@ -191,6 +191,53 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--dna-gpt-regenerator",
+        type=str,
+        choices=["hf", "openai"],
+        default="hf",
+        help=(
+            "Regenerator backend for dna-gpt.  'hf' uses a local "
+            "HuggingFace chat model (default Qwen2.5-7B-Instruct, via "
+            "vLLM if installed); 'openai' uses the OpenAI completions "
+            "API (default gpt-3.5-turbo-instruct)."
+        ),
+    )
+    parser.add_argument(
+        "--dna-gpt-regenerator-model",
+        type=str,
+        default=None,
+        help=(
+            "Override the dna-gpt regenerator model identifier. "
+            "Defaults: Qwen/Qwen2.5-7B-Instruct (hf), "
+            "gpt-3.5-turbo-instruct (openai)."
+        ),
+    )
+    parser.add_argument(
+        "--dna-gpt-k",
+        type=int,
+        default=20,
+        help="Number of regenerations per text for dna-gpt (default: 20).",
+    )
+    parser.add_argument(
+        "--dna-gpt-truncate-ratio",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of each text (by whitespace-split words) used as "
+            "the regeneration prefix for dna-gpt (default: 0.5)."
+        ),
+    )
+    parser.add_argument(
+        "--dna-gpt-prompt-field",
+        type=str,
+        default=None,
+        help=(
+            "Optional dataset column containing the original prompt for "
+            "each text.  When set, dna-gpt prepends the prompt to the "
+            "truncated prefix before regeneration."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -452,6 +499,28 @@ def main(argv: list[str] | None = None) -> int:
                         kwargs["domain_labels"] = domain_vals
                     if args.group_size is not None:
                         kwargs["group_size"] = args.group_size
+                if name == "dna-gpt":
+                    kwargs["regenerator"] = args.dna_gpt_regenerator
+                    if args.dna_gpt_regenerator_model is not None:
+                        kwargs["regenerator_model"] = (
+                            args.dna_gpt_regenerator_model
+                        )
+                    kwargs["K"] = args.dna_gpt_k
+                    kwargs["truncate_ratio"] = args.dna_gpt_truncate_ratio
+                    if args.dna_gpt_prompt_field:
+                        if args.dna_gpt_prompt_field not in df.columns:
+                            logger.warning(
+                                "dna-gpt: prompt field %r not in dataset; "
+                                "running without prompts.",
+                                args.dna_gpt_prompt_field,
+                            )
+                        else:
+                            kwargs["prompts"] = (
+                                df[args.dna_gpt_prompt_field]
+                                .fillna("")
+                                .astype(str)
+                                .tolist()
+                            )
                 scores = detector.score(texts, **kwargs)
                 df[name] = scores
             except Exception:
