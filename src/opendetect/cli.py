@@ -138,6 +138,59 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--multitarget-mode",
+        type=str,
+        choices=["max", "single", "domain", "domain-single"],
+        default="max",
+        help=(
+            "How to use --source-field for style detectors.  'max' (default) "
+            "computes per-class aggregate embeddings and scores by max cosine "
+            "similarity.  'single' uses --source-field only to stratify the "
+            "support set, then pools all stratified samples into one mean "
+            "centroid.  'domain' restricts scoring to same-domain centroids — "
+            "each query is scored against class centroids built from support "
+            "samples sharing its domain (requires --domain-field).  "
+            "'domain-single' samples per (domain, class) pair but pools each "
+            "domain's samples into one mean centroid — queries score against "
+            "their own domain's single centroid (requires --domain-field)."
+        ),
+    )
+    parser.add_argument(
+        "--domain-field",
+        type=str,
+        default=None,
+        help=(
+            "Column name containing domain information for all texts "
+            "(human and machine).  Used with --multitarget-mode domain "
+            "to restrict scoring to same-domain centroids."
+        ),
+    )
+    parser.add_argument(
+        "--domain-preprocess",
+        type=str,
+        default=None,
+        help=(
+            "Python lambda expression to extract the domain from "
+            "--domain-field values, e.g. "
+            "\"lambda x: x.split('_machine')[0].split('_human')[0]\"."
+        ),
+    )
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        default=None,
+        help=(
+            "If set, aggregate queries into groups of this size before "
+            "scoring.  Groups are homogeneous on human-vs-machine, on "
+            "source class (machines, when --source-field is provided), "
+            "and on domain (in domain / domain-single modes).  Remainders "
+            "smaller than the group size are dropped.  Support samples are "
+            "excluded from the group pool per trial.  The NPZ score matrix "
+            "has shape (num_trials, num_groups) with a parallel "
+            "group_labels vector."
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"%(prog)s {__version__}",
@@ -208,9 +261,14 @@ def main(argv: list[str] | None = None) -> int:
                 if npz_path.exists():
                     npz = np.load(npz_path, allow_pickle=True)
                     score_matrix = npz["scores"]
-                    labels_arr = np.array(
-                        (df[args.label_field] == args.machine_label).astype(int),
-                    )
+                    # Grouped runs carry a per-column label vector in the NPZ;
+                    # otherwise fall back to the per-sample label column.
+                    if "group_labels" in npz.files:
+                        labels_arr = npz["group_labels"]
+                    else:
+                        labels_arr = np.array(
+                            (df[args.label_field] == args.machine_label).astype(int),
+                        )
                     trial_avg = evaluate_score_matrix(
                         score_matrix,
                         labels_arr,
@@ -385,6 +443,15 @@ def main(argv: list[str] | None = None) -> int:
                             fn = eval(args.source_preprocess)  # noqa: S307
                             source_vals = [fn(x) for x in source_vals]
                         kwargs["source_labels"] = source_vals
+                        kwargs["multitarget_mode"] = args.multitarget_mode
+                    if args.domain_field:
+                        domain_vals = df[args.domain_field].tolist()
+                        if args.domain_preprocess:
+                            fn = eval(args.domain_preprocess)  # noqa: S307
+                            domain_vals = [fn(x) for x in domain_vals]
+                        kwargs["domain_labels"] = domain_vals
+                    if args.group_size is not None:
+                        kwargs["group_size"] = args.group_size
                 scores = detector.score(texts, **kwargs)
                 df[name] = scores
             except Exception:
