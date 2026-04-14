@@ -23,6 +23,7 @@ class _SupervisedDetector(BaseDetector):
     MODEL_NAME: str  # subclasses must set this
     USE_RAW_LOGITS: bool = False
     MAX_LENGTH: int = 512
+    TRUST_REMOTE_CODE: bool = False
 
     def preprocess(self, texts: list[str]) -> list[str]:
         """Optional dataset preprocessing hook."""
@@ -34,9 +35,13 @@ class _SupervisedDetector(BaseDetector):
         device = get_device()
 
         detector = AutoModelForSequenceClassification.from_pretrained(
-            self.MODEL_NAME
+            self.MODEL_NAME,
+            trust_remote_code=self.TRUST_REMOTE_CODE,
         ).to(device)
-        tokenizer = AutoTokenizer.from_pretrained(self.MODEL_NAME)
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.MODEL_NAME,
+            trust_remote_code=self.TRUST_REMOTE_CODE,
+        )
         detector.eval()
 
         texts = self.preprocess(texts)
