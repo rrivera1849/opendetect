@@ -8,6 +8,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import torch
 
 from opendetect import __version__
 from opendetect.config import get_output_dir
@@ -25,6 +27,17 @@ import opendetect.detectors  # noqa: F401
 from opendetect.registry import get_all_detectors, get_detector, list_detectors
 
 logger = logging.getLogger("opendetect")
+
+
+def _release_gpu_memory() -> None:
+    """Run a full GC pass and empty PyTorch's CUDA caching allocator.
+
+    Call this after a detector finishes so freed GPU blocks return to
+    the pool before the next detector tries to load its weights.
+    Safe to call even when torch is unavailable or running on CPU.
+    """
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -585,10 +598,15 @@ def main(argv: list[str] | None = None) -> int:
                 df[name] = scores
             except Exception:
                 logger.exception("Detector %s failed — skipping.", name)
-                continue
-
-            # Save incrementally after each detector
-            df.to_json(output_path, orient="records", lines=True)
+            else:
+                # Save incrementally after each successful detector.
+                df.to_json(output_path, orient="records", lines=True)
+            finally:
+                # Drop the detector's GPU allocation before the next
+                # one loads; otherwise full-pipeline runs OOM.
+                detector.teardown()
+                del detector
+                _release_gpu_memory()
 
         # --- Final save -----------------------------------------------------------
         df.to_json(output_path, orient="records", lines=True)

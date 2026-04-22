@@ -45,3 +45,16 @@ class BaseDetector(ABC):
     def requires_fewshot(self) -> bool:
         """Whether this detector needs few-shot background texts."""
         return False
+
+    def teardown(self) -> None:
+        """Release resources held on instance attributes.
+
+        Called by the CLI after :meth:`score` finishes (success or
+        failure) so the next detector starts with a clean GPU.  The
+        default is a no-op; subclasses that persist heavy state on
+        ``self`` (HF models, vLLM engines) should override this to
+        drop those references explicitly.  Detectors whose heavy
+        objects are local to :meth:`score` do not need to override —
+        the CLI's ``del`` + ``gc.collect()`` + ``empty_cache()`` covers
+        them.
+        """
