@@ -65,67 +65,6 @@ def load_dataset(
     return df
 
 
-def extract_fewshot(
-    df: pd.DataFrame,
-    num_fewshot: int,
-    label_field: str = "label",
-    machine_label: int = 1,
-    text_field: str = "text",
-) -> tuple[pd.DataFrame, list[str]]:
-    """Extract few-shot examples from the dataset.
-
-    Selects *num_fewshot* rows whose *label_field* equals *machine_label*,
-    removes them from the main dataframe, and returns both the trimmed
-    dataframe and the few-shot texts.
-
-    Parameters
-    ----------
-    df:
-        The full dataset.
-    num_fewshot:
-        Number of machine-text examples to extract for few-shot.
-    label_field:
-        Column name for the label.
-    machine_label:
-        Value in *label_field* that indicates machine-generated text.
-    text_field:
-        Column name for the text.
-
-    Returns
-    -------
-    (remaining_df, fewshot_texts)
-    """
-    if num_fewshot <= 0:
-        return df, []
-
-    if label_field not in df.columns:
-        raise ValueError(
-            f"Column {label_field!r} not found in dataset — "
-            f"required for few-shot extraction.  "
-            f"Available columns: {list(df.columns)}"
-        )
-
-    machine_mask = df[label_field] == machine_label
-    machine_rows = df[machine_mask]
-
-    if len(machine_rows) < num_fewshot:
-        logger.warning(
-            "Requested %d few-shot examples but only %d machine texts available. "
-            "Using all %d.",
-            num_fewshot,
-            len(machine_rows),
-            len(machine_rows),
-        )
-        num_fewshot = len(machine_rows)
-
-    fewshot_indices = machine_rows.index[:num_fewshot]
-    fewshot_texts = df.loc[fewshot_indices, text_field].tolist()
-    remaining = df.drop(fewshot_indices).reset_index(drop=True)
-
-    logger.info("Extracted %d few-shot examples.", len(fewshot_texts))
-    return remaining, fewshot_texts
-
-
 def _load_from_huggingface(name: str, split: str) -> pd.DataFrame:
     """Load a HuggingFace dataset and convert to DataFrame."""
     try:

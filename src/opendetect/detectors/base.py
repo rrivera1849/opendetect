@@ -41,11 +41,6 @@ class BaseDetector(ABC):
         Override this in subclasses that need extra flags.
         """
 
-    @property
-    def requires_fewshot(self) -> bool:
-        """Whether this detector needs few-shot background texts."""
-        return False
-
     def teardown(self) -> None:
         """Release resources held on instance attributes.
 
