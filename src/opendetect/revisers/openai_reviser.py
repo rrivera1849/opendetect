@@ -113,3 +113,6 @@ class OpenAIReviser:
     ) -> list[str]:
         """Return one revised text per input, preserving order."""
         return asyncio.run(self._revise_all(texts))
+
+    def close(self) -> None:
+        """No-op: OpenAI holds no local GPU state."""

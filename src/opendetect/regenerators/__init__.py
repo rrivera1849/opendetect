@@ -54,20 +54,33 @@ class Regenerator(Protocol):
         """
         ...
 
+    def close(self) -> None:
+        """Release any heavy resources (GPU memory, engine workers).
+
+        Safe to call multiple times; subsequent calls are no-ops.
+        """
+        ...
+
 
 def load_regenerator(
     backend: str,
     model: str | None = None,
+    max_model_len: int | None = None,
+    gpu_memory_utilization: float | None = None,
 ) -> Regenerator:
     """Instantiate a regenerator by backend name.
 
     Parameters
     ----------
     backend:
-        ``"hf"`` for a local HuggingFace chat model, ``"openai"`` for
-        the OpenAI API.
+        ``"hf"`` for a local HuggingFace chat model, ``"vllm"`` for the
+        same model served via vLLM, ``"openai"`` for the OpenAI API.
     model:
         Model identifier.  If ``None``, the backend default is used.
+    max_model_len:
+        vLLM-only: cap on prompt + generated tokens.
+    gpu_memory_utilization:
+        vLLM-only: fraction of GPU memory reserved for the model.
 
     Returns
     -------
@@ -80,6 +93,27 @@ def load_regenerator(
         return (
             HFChatRegenerator(model_id=model) if model else HFChatRegenerator()
         )
+    if backend == "vllm":
+        from opendetect.regenerators.vllm_regen import (
+            DEFAULT_GPU_MEMORY_UTILIZATION,
+            DEFAULT_MAX_MODEL_LEN,
+            DEFAULT_VLLM_REGENERATOR,
+            VLLMRegenerator,
+        )
+
+        return VLLMRegenerator(
+            model_id=model or DEFAULT_VLLM_REGENERATOR,
+            max_model_len=(
+                max_model_len
+                if max_model_len is not None
+                else DEFAULT_MAX_MODEL_LEN
+            ),
+            gpu_memory_utilization=(
+                gpu_memory_utilization
+                if gpu_memory_utilization is not None
+                else DEFAULT_GPU_MEMORY_UTILIZATION
+            ),
+        )
     if backend == "openai":
         from opendetect.regenerators.openai_regen import OpenAIRegenerator
 
@@ -87,7 +121,8 @@ def load_regenerator(
             OpenAIRegenerator(model_id=model) if model else OpenAIRegenerator()
         )
     raise ValueError(
-        f"Unknown regenerator backend: {backend!r}. Expected 'hf' or 'openai'.",
+        f"Unknown regenerator backend: {backend!r}. "
+        "Expected 'hf', 'vllm', or 'openai'.",
     )
 
 

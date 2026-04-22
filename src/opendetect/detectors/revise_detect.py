@@ -37,6 +37,10 @@ def _resolve_reviser_id(backend: str, model: str | None) -> str:
         from opendetect.revisers.hf_reviser import DEFAULT_HF_REVISER
 
         return DEFAULT_HF_REVISER
+    if backend == "vllm":
+        from opendetect.revisers.vllm_reviser import DEFAULT_VLLM_REVISER
+
+        return DEFAULT_VLLM_REVISER
     if backend == "openai":
         from opendetect.revisers.openai_reviser import DEFAULT_OPENAI_REVISER
 
@@ -77,6 +81,10 @@ class ReviseDetect(BaseDetector):
         backend: str = kwargs.get("reviser", DEFAULT_REVISER_BACKEND)
         reviser_model: str | None = kwargs.get("reviser_model")
         batch_size: int = kwargs.get("batch_size", 16)
+        max_model_len: int | None = kwargs.get("vllm_max_model_len")
+        gpu_memory_utilization: float | None = kwargs.get(
+            "vllm_gpu_memory_utilization",
+        )
 
         # Resolve the reviser's identity without loading the model yet —
         # if every text is already cached we never need to instantiate it.
@@ -94,17 +102,28 @@ class ReviseDetect(BaseDetector):
         )
 
         # 2. Revise the cache misses and persist.  Lazy-load the reviser
-        #    so runs that fully hit the cache skip model download entirely.
+        #    so runs that fully hit the cache skip model download
+        #    entirely.  Close it before BARTScore loads, otherwise
+        #    vLLM's allocation keeps the GPU pinned during scoring.
         if missing_idx:
-            reviser = load_reviser(backend=backend, model=reviser_model)
-            missing_texts = [texts[i] for i in missing_idx]
-            new_revisions = reviser.revise(
-                missing_texts,
-                batch_size=batch_size,
+            reviser = load_reviser(
+                backend=backend,
+                model=reviser_model,
+                max_model_len=max_model_len,
+                gpu_memory_utilization=gpu_memory_utilization,
             )
-            cache.put_many(list(zip(missing_texts, new_revisions)))
-            for idx, rev in zip(missing_idx, new_revisions):
-                revised[idx] = rev
+            try:
+                missing_texts = [texts[i] for i in missing_idx]
+                new_revisions = reviser.revise(
+                    missing_texts,
+                    batch_size=batch_size,
+                )
+                cache.put_many(list(zip(missing_texts, new_revisions)))
+                for idx, rev in zip(missing_idx, new_revisions):
+                    revised[idx] = rev
+            finally:
+                reviser.close()
+                del reviser
 
         # 3. BARTScore(src=revised, tgt=original) — matches the reference
         #    driver's convention and gives higher scores to LLM text.

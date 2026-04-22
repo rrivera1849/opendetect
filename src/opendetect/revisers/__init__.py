@@ -31,20 +31,33 @@ class Reviser(Protocol):
         """Return the reviser's output for each input text."""
         ...
 
+    def close(self) -> None:
+        """Release any heavy resources (GPU memory, engine workers).
+
+        Safe to call multiple times; subsequent calls are no-ops.
+        """
+        ...
+
 
 def load_reviser(
     backend: str,
     model: str | None = None,
+    max_model_len: int | None = None,
+    gpu_memory_utilization: float | None = None,
 ) -> Reviser:
     """Factory: instantiate a reviser by backend name.
 
     Parameters
     ----------
     backend:
-        ``"hf"`` for a local HuggingFace chat model, ``"openai"`` for the
-        OpenAI API.
+        ``"hf"`` for a local HuggingFace chat model, ``"vllm"`` for the
+        same model served via vLLM, ``"openai"`` for the OpenAI API.
     model:
         Model identifier.  If ``None``, the backend's default is used.
+    max_model_len:
+        vLLM-only: cap on prompt + generated tokens.
+    gpu_memory_utilization:
+        vLLM-only: fraction of GPU memory reserved for the model.
 
     Returns
     -------
@@ -55,12 +68,34 @@ def load_reviser(
         from opendetect.revisers.hf_reviser import HFChatReviser
 
         return HFChatReviser(model_id=model) if model else HFChatReviser()
+    if backend == "vllm":
+        from opendetect.revisers.vllm_reviser import (
+            DEFAULT_GPU_MEMORY_UTILIZATION,
+            DEFAULT_MAX_MODEL_LEN,
+            DEFAULT_VLLM_REVISER,
+            VLLMReviser,
+        )
+
+        return VLLMReviser(
+            model_id=model or DEFAULT_VLLM_REVISER,
+            max_model_len=(
+                max_model_len
+                if max_model_len is not None
+                else DEFAULT_MAX_MODEL_LEN
+            ),
+            gpu_memory_utilization=(
+                gpu_memory_utilization
+                if gpu_memory_utilization is not None
+                else DEFAULT_GPU_MEMORY_UTILIZATION
+            ),
+        )
     if backend == "openai":
         from opendetect.revisers.openai_reviser import OpenAIReviser
 
         return OpenAIReviser(model_id=model) if model else OpenAIReviser()
     raise ValueError(
-        f"Unknown reviser backend: {backend!r}. Expected 'hf' or 'openai'.",
+        f"Unknown reviser backend: {backend!r}. "
+        "Expected 'hf', 'vllm', or 'openai'.",
     )
 
 

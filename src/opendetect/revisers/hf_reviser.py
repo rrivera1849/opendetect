@@ -119,3 +119,6 @@ class HFChatReviser:
                     revised = original
                 outputs.append(revised)
         return outputs
+
+    def close(self) -> None:
+        """No-op: the HF model is dropped when this object is released."""

@@ -115,3 +115,6 @@ class OpenAIRegenerator:
         return asyncio.run(
             self._regen_all(prefixes, K, max_new_tokens, temperature),
         )
+
+    def close(self) -> None:
+        """No-op: OpenAI holds no local GPU state."""

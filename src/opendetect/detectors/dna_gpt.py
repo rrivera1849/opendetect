@@ -146,6 +146,12 @@ def _resolve_regenerator_id(backend: str, model: str | None) -> str:
         from opendetect.regenerators.hf_regen import DEFAULT_HF_REGENERATOR
 
         return DEFAULT_HF_REGENERATOR
+    if backend == "vllm":
+        from opendetect.regenerators.vllm_regen import (
+            DEFAULT_VLLM_REGENERATOR,
+        )
+
+        return DEFAULT_VLLM_REGENERATOR
     if backend == "openai":
         from opendetect.regenerators.openai_regen import (
             DEFAULT_OPENAI_REGENERATOR,
@@ -207,6 +213,10 @@ class DnaGpt(BaseDetector):
         n_max: int = int(kwargs.get("n_max", DEFAULT_N_MAX))
         prompts: list[str] | None = kwargs.get("prompts")
         batch_size: int = int(kwargs.get("batch_size", 8))
+        max_model_len: int | None = kwargs.get("vllm_max_model_len")
+        gpu_memory_utilization: float | None = kwargs.get(
+            "vllm_gpu_memory_utilization",
+        )
 
         if prompts is not None and len(prompts) != len(texts):
             raise ValueError(
@@ -240,27 +250,36 @@ class DnaGpt(BaseDetector):
             len(missing_idx),
         )
 
-        # Regenerate cache misses.
+        # Regenerate cache misses.  Close the regenerator after use so
+        # vLLM releases its GPU allocation before the scoring step
+        # (and before the next detector in the CLI loop) runs.
         if missing_idx:
             regenerator = load_regenerator(
-                backend=backend, model=regenerator_model,
+                backend=backend,
+                model=regenerator_model,
+                max_model_len=max_model_len,
+                gpu_memory_utilization=gpu_memory_utilization,
             )
-            missing_prefixes = [prefixes[i] for i in missing_idx]
-            new_continuations = regenerator.regenerate(
-                missing_prefixes,
-                K=K,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                batch_size=batch_size,
-            )
-            cache.put_many(
-                [
-                    (prefixes[i], truncate_ratio, K, conts)
-                    for i, conts in zip(missing_idx, new_continuations)
-                ],
-            )
-            for idx, conts in zip(missing_idx, new_continuations):
-                cached[idx] = conts
+            try:
+                missing_prefixes = [prefixes[i] for i in missing_idx]
+                new_continuations = regenerator.regenerate(
+                    missing_prefixes,
+                    K=K,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    batch_size=batch_size,
+                )
+                cache.put_many(
+                    [
+                        (prefixes[i], truncate_ratio, K, conts)
+                        for i, conts in zip(missing_idx, new_continuations)
+                    ],
+                )
+                for idx, conts in zip(missing_idx, new_continuations):
+                    cached[idx] = conts
+            finally:
+                regenerator.close()
+                del regenerator
 
         # Score.
         from nltk.stem.porter import PorterStemmer

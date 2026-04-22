@@ -197,12 +197,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reviser",
         type=str,
-        choices=["hf", "openai"],
+        choices=["hf", "vllm", "openai"],
         default="hf",
         help=(
-            "Reviser backend for revise-detect.  'hf' loads a local "
-            "HuggingFace chat model (default Qwen2.5-7B-Instruct); "
-            "'openai' calls the OpenAI API (requires OPENAI_API_KEY)."
+            "Reviser backend for revise-detect.  'hf' uses "
+            "transformers; 'vllm' serves the same model via vLLM for "
+            "much faster batched generation (default model "
+            "Qwen2.5-7B-Instruct); 'openai' calls the OpenAI API "
+            "(requires OPENAI_API_KEY)."
         ),
     )
     parser.add_argument(
@@ -211,18 +213,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Override the reviser model identifier.  Defaults: "
-            "Qwen/Qwen2.5-7B-Instruct (hf), gpt-4o-mini (openai)."
+            "Qwen/Qwen2.5-7B-Instruct (hf/vllm), gpt-4o-mini (openai)."
         ),
     )
     parser.add_argument(
         "--dna-gpt-regenerator",
         type=str,
-        choices=["hf", "openai"],
+        choices=["hf", "vllm", "openai"],
         default="hf",
         help=(
-            "Regenerator backend for dna-gpt.  'hf' uses a local "
-            "HuggingFace chat model (default Qwen2.5-7B-Instruct, via "
-            "vLLM if installed); 'openai' uses the OpenAI completions "
+            "Regenerator backend for dna-gpt.  'hf' uses transformers; "
+            "'vllm' serves the same model via vLLM (recommended for "
+            "K>1 continuations); 'openai' uses the OpenAI completions "
             "API (default gpt-3.5-turbo-instruct)."
         ),
     )
@@ -232,8 +234,28 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Override the dna-gpt regenerator model identifier. "
-            "Defaults: Qwen/Qwen2.5-7B-Instruct (hf), "
+            "Defaults: Qwen/Qwen2.5-7B-Instruct (hf/vllm), "
             "gpt-3.5-turbo-instruct (openai)."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-max-model-len",
+        type=int,
+        default=4096,
+        help=(
+            "vLLM max_model_len (cap on prompt + generated tokens) "
+            "for revise-detect / dna-gpt when --reviser vllm or "
+            "--dna-gpt-regenerator vllm is set.  Default: 4096."
+        ),
+    )
+    parser.add_argument(
+        "--vllm-gpu-memory-utilization",
+        type=float,
+        default=0.9,
+        help=(
+            "vLLM gpu_memory_utilization fraction for revise-detect / "
+            "dna-gpt when a vllm backend is selected.  Lower if other "
+            "processes share the GPU.  Default: 0.9."
         ),
     )
     parser.add_argument(
@@ -527,11 +549,21 @@ def main(argv: list[str] | None = None) -> int:
                     kwargs["reviser"] = args.reviser
                     if args.reviser_model is not None:
                         kwargs["reviser_model"] = args.reviser_model
+                    if args.reviser == "vllm":
+                        kwargs["vllm_max_model_len"] = args.vllm_max_model_len
+                        kwargs["vllm_gpu_memory_utilization"] = (
+                            args.vllm_gpu_memory_utilization
+                        )
                 if name == "dna-gpt":
                     kwargs["regenerator"] = args.dna_gpt_regenerator
                     if args.dna_gpt_regenerator_model is not None:
                         kwargs["regenerator_model"] = (
                             args.dna_gpt_regenerator_model
+                        )
+                    if args.dna_gpt_regenerator == "vllm":
+                        kwargs["vllm_max_model_len"] = args.vllm_max_model_len
+                        kwargs["vllm_gpu_memory_utilization"] = (
+                            args.vllm_gpu_memory_utilization
                         )
                     kwargs["K"] = args.dna_gpt_k
                     kwargs["truncate_ratio"] = args.dna_gpt_truncate_ratio
